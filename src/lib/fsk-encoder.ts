@@ -260,17 +260,37 @@ export class LiveShellFSKEncoder {
   }
 }
 
-// プラットフォームプリセット
+// プラットフォームプリセット（2025年版）
 export const PLATFORM_PRESETS = [
   {
     id: 'youtube',
     name: 'YouTube Live',
     rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2',
+    note: 'YouTube Studioからストリームキーを取得',
+  },
+  {
+    id: 'tiktok',
+    name: 'TikTok LIVE',
+    rtmpUrl: '',
+    note: 'TikTok LIVE Studio設定からRTMP URLとキーを取得（フォロワー1,000人以上必要）',
   },
   {
     id: 'twitch',
     name: 'Twitch',
     rtmpUrl: 'rtmp://live-tyo.twitch.tv/app',
+    note: '東京サーバー。他地域: live.twitch.tv/app',
+  },
+  {
+    id: 'kick',
+    name: 'Kick',
+    rtmpUrl: '',
+    note: 'Kick設定ページからRTMP URL（rtmps://...）とキーを取得',
+  },
+  {
+    id: 'twicas',
+    name: 'ツイキャス',
+    rtmpUrl: 'rtmp://rtmp03.twitcasting.tv/live',
+    note: 'ツール配信設定からキーを取得',
   },
   {
     id: 'niconico',
