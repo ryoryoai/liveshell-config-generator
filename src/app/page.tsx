@@ -4,15 +4,18 @@ import { useState, useRef } from 'react';
 import { LiveShellFSKEncoder, LiveShellConfig, PLATFORM_PRESETS } from '@/lib/fsk-encoder';
 
 export default function Home() {
+  // 初期プラットフォーム
+  const initialPlatform = PLATFORM_PRESETS[0];
+
   const [config, setConfig] = useState<LiveShellConfig>({
     connectionType: 'ethernet',
     ipMode: 'dhcp',
     streamMode: 'rtmp',
-    rtmpUrl: '',
+    rtmpUrl: initialPlatform.rtmpUrl,
     streamKey: '',
   });
 
-  const [platform, setPlatform] = useState('youtube');
+  const [platform, setPlatform] = useState(initialPlatform.id);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
