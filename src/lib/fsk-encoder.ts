@@ -94,21 +94,22 @@ export class LiveShellFSKEncoder {
 
   /**
    * 文字列をバイナリに変換（8N1フォーマット）
+   * サンプル音声解析に基づく構造:
+   * - プリアンブル: 500ビットの連続した1
+   * - データ: 8N1 (スタート0 + 8bit LSB first + ストップ1)
+   * - ポストアンブル: 連続した1でパディング
    */
   private stringToBinary(str: string): string {
     let binary = '';
 
-    // プリアンブル（連続した1）- サンプル音声に合わせる
+    // プリアンブル（500ビットの連続した1）
     for (let i = 0; i < FSK_CONFIG.preambleLength; i++) {
       binary += '1';
     }
 
-    // データを複数回送信（冗長性のため）
+    // データを3回送信（冗長性のため）
     for (let repeat = 0; repeat < 3; repeat++) {
-      // 同期バイト（フレーム開始マーカー）
-      binary += '01111110'; // 0x7E
-
-      // データ
+      // データ（8N1フォーマット）
       for (let i = 0; i < str.length; i++) {
         const charCode = str.charCodeAt(i);
         // 8N1: スタートビット(0) + 8データビット(LSB first) + ストップビット(1)
@@ -122,10 +123,7 @@ export class LiveShellFSKEncoder {
         binary += '1'; // ストップビット
       }
 
-      // フレーム終了マーカー
-      binary += '01111110'; // 0x7E
-
-      // フレーム間ギャップ
+      // フレーム間ギャップ（連続した1）
       for (let i = 0; i < 50; i++) {
         binary += '1';
       }
@@ -136,7 +134,7 @@ export class LiveShellFSKEncoder {
       binary += '1';
     }
 
-    // 最小長さを確保
+    // 最小長さを確保（5秒）
     const minBits = Math.ceil(FSK_CONFIG.minDurationSeconds * FSK_CONFIG.baudRate);
     while (binary.length < minBits) {
       binary += '1';
