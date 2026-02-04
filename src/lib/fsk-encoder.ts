@@ -1,0 +1,286 @@
+/**
+ * LiveShell PRO FSK Audio Encoder
+ *
+ * 解析結果に基づくパラメータ:
+ * - スペース周波数: 1900 Hz (ビット 0)
+ * - マーク周波数: 2500 Hz (ビット 1)
+ * - ボーレート: 1200 bps
+ * - サンプルレート: 44100 Hz
+ */
+
+export interface LiveShellConfig {
+  // ネットワーク設定
+  connectionType: 'wifi' | 'ethernet';
+  ipMode: 'dhcp' | 'static';
+  staticIp?: string;
+  subnetMask?: string;
+  gateway?: string;
+  dns?: string;
+
+  // Wi-Fi設定（Wi-Fi選択時のみ）
+  ssid?: string;
+  password?: string;
+
+  // 配信設定
+  streamMode: 'rtmp' | 'rtsp';
+  rtmpUrl?: string;
+  streamKey?: string;
+}
+
+const FSK_CONFIG = {
+  sampleRate: 44100,
+  spaceFreq: 1900,  // ビット 0
+  markFreq: 2500,   // ビット 1
+  baudRate: 1200,
+  amplitude: 0.8,
+  // プリアンブル（同期用）
+  preambleLength: 100, // ビット数
+};
+
+export class LiveShellFSKEncoder {
+  private audioContext: AudioContext | null = null;
+
+  /**
+   * 設定をJSONにシリアライズ
+   */
+  private serializeConfig(config: LiveShellConfig): string {
+    const payload: Record<string, unknown> = {
+      net: {
+        type: config.connectionType === 'wifi' ? 'wifi' : 'eth',
+        ip: config.ipMode,
+      },
+      stream: {
+        mode: config.streamMode,
+      },
+    };
+
+    // 固定IP設定
+    if (config.ipMode === 'static') {
+      payload.net = {
+        ...payload.net as object,
+        addr: config.staticIp,
+        mask: config.subnetMask,
+        gw: config.gateway,
+        dns: config.dns,
+      };
+    }
+
+    // Wi-Fi設定
+    if (config.connectionType === 'wifi') {
+      payload.wifi = {
+        ssid: config.ssid,
+        pass: config.password,
+      };
+    }
+
+    // RTMP設定
+    if (config.streamMode === 'rtmp' && config.rtmpUrl) {
+      payload.stream = {
+        ...payload.stream as object,
+        url: config.rtmpUrl,
+        key: config.streamKey || '',
+      };
+    }
+
+    return JSON.stringify(payload);
+  }
+
+  /**
+   * 文字列をバイナリに変換（8N1フォーマット）
+   */
+  private stringToBinary(str: string): string {
+    let binary = '';
+
+    // プリアンブル（交互の0/1パターン）
+    for (let i = 0; i < FSK_CONFIG.preambleLength; i++) {
+      binary += i % 2 === 0 ? '1' : '0';
+    }
+
+    // 同期バイト
+    binary += '01111110'; // 0x7E
+
+    // データ
+    for (let i = 0; i < str.length; i++) {
+      const charCode = str.charCodeAt(i);
+      // 8N1: スタートビット(0) + 8データビット(LSB first) + ストップビット(1)
+      binary += '0'; // スタートビット
+
+      // LSB first
+      for (let bit = 0; bit < 8; bit++) {
+        binary += ((charCode >> bit) & 1).toString();
+      }
+
+      binary += '1'; // ストップビット
+    }
+
+    // 終了マーカー
+    binary += '01111110'; // 0x7E
+
+    // ポストアンブル
+    for (let i = 0; i < 50; i++) {
+      binary += '1';
+    }
+
+    return binary;
+  }
+
+  /**
+   * FSK変調してAudioBufferを生成
+   */
+  generateAudio(config: LiveShellConfig): AudioBuffer {
+    if (!this.audioContext) {
+      this.audioContext = new AudioContext({ sampleRate: FSK_CONFIG.sampleRate });
+    }
+
+    const jsonData = this.serializeConfig(config);
+    console.log('Config JSON:', jsonData);
+
+    const binaryData = this.stringToBinary(jsonData);
+    console.log('Binary length:', binaryData.length, 'bits');
+
+    const samplesPerBit = FSK_CONFIG.sampleRate / FSK_CONFIG.baudRate;
+    const totalSamples = Math.ceil(binaryData.length * samplesPerBit);
+
+    const buffer = this.audioContext.createBuffer(
+      1, // モノラル
+      totalSamples,
+      FSK_CONFIG.sampleRate
+    );
+
+    const channelData = buffer.getChannelData(0);
+    let sampleIndex = 0;
+    let phase = 0;
+
+    for (let i = 0; i < binaryData.length; i++) {
+      const freq = binaryData[i] === '1' ? FSK_CONFIG.markFreq : FSK_CONFIG.spaceFreq;
+      const bitSamples = Math.floor(samplesPerBit);
+      const phaseIncrement = (2 * Math.PI * freq) / FSK_CONFIG.sampleRate;
+
+      for (let j = 0; j < bitSamples && sampleIndex < totalSamples; j++) {
+        // 位相連続FSK
+        channelData[sampleIndex] = FSK_CONFIG.amplitude * Math.sin(phase);
+        phase += phaseIncrement;
+        sampleIndex++;
+      }
+
+      // 位相を正規化
+      phase = phase % (2 * Math.PI);
+    }
+
+    return buffer;
+  }
+
+  /**
+   * AudioBufferを再生
+   */
+  async play(buffer: AudioBuffer): Promise<void> {
+    if (!this.audioContext) {
+      this.audioContext = new AudioContext({ sampleRate: FSK_CONFIG.sampleRate });
+    }
+
+    if (this.audioContext.state === 'suspended') {
+      await this.audioContext.resume();
+    }
+
+    return new Promise((resolve) => {
+      const source = this.audioContext!.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.audioContext!.destination);
+      source.onended = () => resolve();
+      source.start();
+    });
+  }
+
+  /**
+   * AudioBufferをWAVファイルに変換してダウンロード
+   */
+  downloadAsWav(buffer: AudioBuffer, filename: string = 'liveshell_config.wav'): void {
+    const wavData = this.audioBufferToWav(buffer);
+    const blob = new Blob([wavData], { type: 'audio/wav' });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+
+    URL.revokeObjectURL(url);
+  }
+
+  /**
+   * AudioBufferをWAVバイナリに変換
+   */
+  private audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+
+    const samples = buffer.getChannelData(0);
+    const dataLength = samples.length * bytesPerSample;
+    const bufferLength = 44 + dataLength;
+
+    const arrayBuffer = new ArrayBuffer(bufferLength);
+    const view = new DataView(arrayBuffer);
+
+    // WAVヘッダー
+    this.writeString(view, 0, 'RIFF');
+    view.setUint32(4, bufferLength - 8, true);
+    this.writeString(view, 8, 'WAVE');
+    this.writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true); // fmt chunk size
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    this.writeString(view, 36, 'data');
+    view.setUint32(40, dataLength, true);
+
+    // オーディオデータ
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++) {
+      const sample = Math.max(-1, Math.min(1, samples[i]));
+      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      view.setInt16(offset, intSample, true);
+      offset += 2;
+    }
+
+    return arrayBuffer;
+  }
+
+  private writeString(view: DataView, offset: number, str: string): void {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  }
+}
+
+// プラットフォームプリセット
+export const PLATFORM_PRESETS = [
+  {
+    id: 'youtube',
+    name: 'YouTube Live',
+    rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2',
+  },
+  {
+    id: 'twitch',
+    name: 'Twitch',
+    rtmpUrl: 'rtmp://live-tyo.twitch.tv/app',
+  },
+  {
+    id: 'niconico',
+    name: 'ニコニコ生放送',
+    rtmpUrl: '',
+    note: 'RTMP URLは放送ごとに変わります',
+  },
+  {
+    id: 'custom',
+    name: 'カスタム',
+    rtmpUrl: '',
+  },
+];
