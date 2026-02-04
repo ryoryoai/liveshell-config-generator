@@ -36,12 +36,12 @@ const FSK_CONFIG = {
   get baudRate() { return this.sampleRate / 36; },  // 1225 bps
   get samplesPerBit() { return 36; },
   amplitude: 0.1,  // サンプル音声と同じ振幅
-  // プリアンブル（同期用）- サンプル音声に合わせて長めに
-  preambleLength: 500,
+  // プリアンブル（同期用）- Wayback音声解析結果: 約10ビット
+  preambleLength: 10,
   // ポストアンブル
-  postambleLength: 500,
-  // 最小長さ（サンプル音声が約5秒なので）
-  minDurationSeconds: 5,
+  postambleLength: 50,
+  // 最小長さ（サンプル音声が約4秒）
+  minDurationSeconds: 4,
 };
 
 export class LiveShellFSKEncoder {
@@ -94,39 +94,31 @@ export class LiveShellFSKEncoder {
 
   /**
    * 文字列をバイナリに変換（8N1フォーマット）
-   * サンプル音声解析に基づく構造:
-   * - プリアンブル: 500ビットの連続した1
+   * Wayback Machine音声解析に基づく構造:
+   * - プリアンブル: 約10ビットの連続した1
    * - データ: 8N1 (スタート0 + 8bit LSB first + ストップ1)
    * - ポストアンブル: 連続した1でパディング
    */
   private stringToBinary(str: string): string {
     let binary = '';
 
-    // プリアンブル（500ビットの連続した1）
+    // プリアンブル（約10ビットの連続した1）
     for (let i = 0; i < FSK_CONFIG.preambleLength; i++) {
       binary += '1';
     }
 
-    // データを3回送信（冗長性のため）
-    for (let repeat = 0; repeat < 3; repeat++) {
-      // データ（8N1フォーマット）
-      for (let i = 0; i < str.length; i++) {
-        const charCode = str.charCodeAt(i);
-        // 8N1: スタートビット(0) + 8データビット(LSB first) + ストップビット(1)
-        binary += '0'; // スタートビット
+    // データ（8N1フォーマット）- 1回のみ送信
+    for (let i = 0; i < str.length; i++) {
+      const charCode = str.charCodeAt(i);
+      // 8N1: スタートビット(0) + 8データビット(LSB first) + ストップビット(1)
+      binary += '0'; // スタートビット
 
-        // LSB first
-        for (let bit = 0; bit < 8; bit++) {
-          binary += ((charCode >> bit) & 1).toString();
-        }
-
-        binary += '1'; // ストップビット
+      // LSB first
+      for (let bit = 0; bit < 8; bit++) {
+        binary += ((charCode >> bit) & 1).toString();
       }
 
-      // フレーム間ギャップ（連続した1）
-      for (let i = 0; i < 50; i++) {
-        binary += '1';
-      }
+      binary += '1'; // ストップビット
     }
 
     // ポストアンブル（連続した1）
@@ -134,7 +126,7 @@ export class LiveShellFSKEncoder {
       binary += '1';
     }
 
-    // 最小長さを確保（5秒）
+    // 最小長さを確保（約4秒）
     const minBits = Math.ceil(FSK_CONFIG.minDurationSeconds * FSK_CONFIG.baudRate);
     while (binary.length < minBits) {
       binary += '1';
