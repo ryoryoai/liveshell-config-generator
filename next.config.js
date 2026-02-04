@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'export',
-  trailingSlash: true,
+  // API Routes使用のため静的エクスポートを無効化
+  // output: 'export',
 }
 
 module.exports = nextConfig

@@ -1,11 +1,13 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { LiveShellFSKEncoder, LiveShellConfig, PLATFORM_PRESETS } from '@/lib/fsk-encoder';
 
-export default function Home() {
+function HomeContent() {
   // 初期プラットフォーム
   const initialPlatform = PLATFORM_PRESETS[0];
+  const searchParams = useSearchParams();
 
   const [config, setConfig] = useState<LiveShellConfig>({
     connectionType: 'ethernet',
@@ -19,6 +21,40 @@ export default function Home() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
+  const [oauthMessage, setOauthMessage] = useState<string | null>(null);
+
+  // OAuthコールバックからのパラメータを処理
+  useEffect(() => {
+    const streamKey = searchParams.get('streamKey');
+    const streamName = searchParams.get('streamName');
+    const platformParam = searchParams.get('platform');
+    const error = searchParams.get('error');
+
+    if (error) {
+      const errorMessages: Record<string, string> = {
+        'access_denied': 'アクセスが拒否されました',
+        'no_code': '認証コードが取得できませんでした',
+        'token_exchange_failed': 'トークン交換に失敗しました',
+        'youtube_api_failed': 'YouTube APIエラーが発生しました',
+        'no_stream_key': 'ストリームキーが見つかりません。YouTube Studioで配信を作成してください',
+        'callback_failed': 'コールバック処理に失敗しました',
+      };
+      setOauthMessage(errorMessages[error] || `エラー: ${error}`);
+      // URLからパラメータを削除
+      window.history.replaceState({}, '', '/');
+    } else if (streamKey && platformParam === 'youtube') {
+      // YouTubeのストリームキーを設定
+      setPlatform('youtube');
+      setConfig(prev => ({
+        ...prev,
+        rtmpUrl: 'rtmp://a.rtmp.youtube.com/live2',
+        streamKey: streamKey,
+      }));
+      setOauthMessage(`YouTube配信「${streamName || 'Default'}」のストリームキーを取得しました`);
+      // URLからパラメータを削除
+      window.history.replaceState({}, '', '/');
+    }
+  }, [searchParams]);
 
   const encoderRef = useRef<LiveShellFSKEncoder | null>(null);
 
@@ -253,14 +289,45 @@ export default function Home() {
 
             <div>
               <label className="block text-sm text-gray-400 mb-1">ストリームキー</label>
-              <input
-                type="text"
-                value={config.streamKey || ''}
-                onChange={e => setConfig(prev => ({ ...prev, streamKey: e.target.value }))}
-                className="input"
-                placeholder="xxxx-xxxx-xxxx-xxxx"
-              />
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={config.streamKey || ''}
+                  onChange={e => setConfig(prev => ({ ...prev, streamKey: e.target.value }))}
+                  className="input flex-1"
+                  placeholder="xxxx-xxxx-xxxx-xxxx"
+                />
+                {platform === 'youtube' && (
+                  <a
+                    href="/api/auth/youtube"
+                    className="btn btn-secondary whitespace-nowrap"
+                  >
+                    YouTube連携
+                  </a>
+                )}
+              </div>
+              {platform === 'youtube' && (
+                <p className="text-xs text-gray-500 mt-1">
+                  「YouTube連携」でストリームキーを自動取得できます
+                </p>
+              )}
             </div>
+
+            {oauthMessage && (
+              <div className={`p-3 rounded-lg text-sm ${
+                oauthMessage.includes('エラー') || oauthMessage.includes('失敗') || oauthMessage.includes('見つかりません')
+                  ? 'bg-red-900/50 text-red-300'
+                  : 'bg-green-900/50 text-green-300'
+              }`}>
+                {oauthMessage}
+                <button
+                  onClick={() => setOauthMessage(null)}
+                  className="ml-2 text-gray-400 hover:text-white"
+                >
+                  ×
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
@@ -317,5 +384,19 @@ export default function Home() {
         </div>
       </div>
     </main>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={
+      <main className="container mx-auto px-4 py-8 max-w-2xl">
+        <div className="text-center">
+          <p className="text-gray-400">読み込み中...</p>
+        </div>
+      </main>
+    }>
+      <HomeContent />
+    </Suspense>
   );
 }
