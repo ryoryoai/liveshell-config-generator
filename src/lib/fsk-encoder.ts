@@ -1,11 +1,12 @@
 /**
  * LiveShell PRO FSK Audio Encoder
  *
- * 解析結果に基づくパラメータ:
- * - スペース周波数: 1900 Hz (ビット 0)
- * - マーク周波数: 2500 Hz (ビット 1)
- * - ボーレート: 1200 bps
+ * サンプル音声解析に基づくパラメータ:
+ * - スペース周波数: 5512.5 Hz (ビット 0) = sampleRate / 8
+ * - マーク周波数: 11025 Hz (ビット 1) = sampleRate / 4
+ * - ボーレート: 1225 bps (36 samples/bit)
  * - サンプルレート: 44100 Hz
+ * - 振幅: 0.1 (10%)
  */
 
 export interface LiveShellConfig {
@@ -29,12 +30,16 @@ export interface LiveShellConfig {
 
 const FSK_CONFIG = {
   sampleRate: 44100,
-  spaceFreq: 1900,  // ビット 0
-  markFreq: 2500,   // ビット 1
-  baudRate: 1200,
-  amplitude: 0.8,
-  // プリアンブル（同期用）
-  preambleLength: 100, // ビット数
+  // 周波数はサンプルレートの1/8と1/4
+  get spaceFreq() { return this.sampleRate / 8; },  // 5512.5 Hz (ビット 0)
+  get markFreq() { return this.sampleRate / 4; },   // 11025 Hz (ビット 1)
+  get baudRate() { return this.sampleRate / 36; },  // 1225 bps
+  get samplesPerBit() { return 36; },
+  amplitude: 0.1,  // サンプル音声と同じ振幅
+  // プリアンブル（同期用）- サンプルでは約270ビットの1が先頭にある
+  preambleLength: 270,
+  // ポストアンブル
+  postambleLength: 100,
 };
 
 export class LiveShellFSKEncoder {
@@ -91,13 +96,10 @@ export class LiveShellFSKEncoder {
   private stringToBinary(str: string): string {
     let binary = '';
 
-    // プリアンブル（交互の0/1パターン）
+    // プリアンブル（連続した1）- サンプル音声に合わせる
     for (let i = 0; i < FSK_CONFIG.preambleLength; i++) {
-      binary += i % 2 === 0 ? '1' : '0';
+      binary += '1';
     }
-
-    // 同期バイト
-    binary += '01111110'; // 0x7E
 
     // データ
     for (let i = 0; i < str.length; i++) {
@@ -113,11 +115,8 @@ export class LiveShellFSKEncoder {
       binary += '1'; // ストップビット
     }
 
-    // 終了マーカー
-    binary += '01111110'; // 0x7E
-
-    // ポストアンブル
-    for (let i = 0; i < 50; i++) {
+    // ポストアンブル（連続した1）
+    for (let i = 0; i < FSK_CONFIG.postambleLength; i++) {
       binary += '1';
     }
 
@@ -134,12 +133,15 @@ export class LiveShellFSKEncoder {
 
     const jsonData = this.serializeConfig(config);
     console.log('Config JSON:', jsonData);
+    console.log('JSON length:', jsonData.length, 'chars');
 
     const binaryData = this.stringToBinary(jsonData);
     console.log('Binary length:', binaryData.length, 'bits');
 
-    const samplesPerBit = FSK_CONFIG.sampleRate / FSK_CONFIG.baudRate;
-    const totalSamples = Math.ceil(binaryData.length * samplesPerBit);
+    const samplesPerBit = FSK_CONFIG.samplesPerBit;
+    const totalSamples = binaryData.length * samplesPerBit;
+    const duration = totalSamples / FSK_CONFIG.sampleRate;
+    console.log('Audio duration:', duration.toFixed(2), 'seconds');
 
     const buffer = this.audioContext.createBuffer(
       1, // モノラル
@@ -151,20 +153,26 @@ export class LiveShellFSKEncoder {
     let sampleIndex = 0;
     let phase = 0;
 
-    for (let i = 0; i < binaryData.length; i++) {
-      const freq = binaryData[i] === '1' ? FSK_CONFIG.markFreq : FSK_CONFIG.spaceFreq;
-      const bitSamples = Math.floor(samplesPerBit);
-      const phaseIncrement = (2 * Math.PI * freq) / FSK_CONFIG.sampleRate;
+    const spaceFreq = FSK_CONFIG.spaceFreq;
+    const markFreq = FSK_CONFIG.markFreq;
+    const amplitude = FSK_CONFIG.amplitude;
+    const sampleRate = FSK_CONFIG.sampleRate;
 
-      for (let j = 0; j < bitSamples && sampleIndex < totalSamples; j++) {
+    for (let i = 0; i < binaryData.length; i++) {
+      const freq = binaryData[i] === '1' ? markFreq : spaceFreq;
+      const phaseIncrement = (2 * Math.PI * freq) / sampleRate;
+
+      for (let j = 0; j < samplesPerBit; j++) {
         // 位相連続FSK
-        channelData[sampleIndex] = FSK_CONFIG.amplitude * Math.sin(phase);
+        channelData[sampleIndex] = amplitude * Math.sin(phase);
         phase += phaseIncrement;
         sampleIndex++;
       }
 
-      // 位相を正規化
-      phase = phase % (2 * Math.PI);
+      // 位相を正規化（オーバーフロー防止）
+      if (phase > 2 * Math.PI * 1000) {
+        phase = phase % (2 * Math.PI);
+      }
     }
 
     return buffer;
