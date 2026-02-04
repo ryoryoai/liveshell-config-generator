@@ -36,10 +36,12 @@ const FSK_CONFIG = {
   get baudRate() { return this.sampleRate / 36; },  // 1225 bps
   get samplesPerBit() { return 36; },
   amplitude: 0.1,  // サンプル音声と同じ振幅
-  // プリアンブル（同期用）- サンプルでは約270ビットの1が先頭にある
-  preambleLength: 270,
+  // プリアンブル（同期用）- サンプル音声に合わせて長めに
+  preambleLength: 500,
   // ポストアンブル
-  postambleLength: 100,
+  postambleLength: 500,
+  // 最小長さ（サンプル音声が約5秒なので）
+  minDurationSeconds: 5,
 };
 
 export class LiveShellFSKEncoder {
@@ -101,22 +103,42 @@ export class LiveShellFSKEncoder {
       binary += '1';
     }
 
-    // データ
-    for (let i = 0; i < str.length; i++) {
-      const charCode = str.charCodeAt(i);
-      // 8N1: スタートビット(0) + 8データビット(LSB first) + ストップビット(1)
-      binary += '0'; // スタートビット
+    // データを複数回送信（冗長性のため）
+    for (let repeat = 0; repeat < 3; repeat++) {
+      // 同期バイト（フレーム開始マーカー）
+      binary += '01111110'; // 0x7E
 
-      // LSB first
-      for (let bit = 0; bit < 8; bit++) {
-        binary += ((charCode >> bit) & 1).toString();
+      // データ
+      for (let i = 0; i < str.length; i++) {
+        const charCode = str.charCodeAt(i);
+        // 8N1: スタートビット(0) + 8データビット(LSB first) + ストップビット(1)
+        binary += '0'; // スタートビット
+
+        // LSB first
+        for (let bit = 0; bit < 8; bit++) {
+          binary += ((charCode >> bit) & 1).toString();
+        }
+
+        binary += '1'; // ストップビット
       }
 
-      binary += '1'; // ストップビット
+      // フレーム終了マーカー
+      binary += '01111110'; // 0x7E
+
+      // フレーム間ギャップ
+      for (let i = 0; i < 50; i++) {
+        binary += '1';
+      }
     }
 
     // ポストアンブル（連続した1）
     for (let i = 0; i < FSK_CONFIG.postambleLength; i++) {
+      binary += '1';
+    }
+
+    // 最小長さを確保
+    const minBits = Math.ceil(FSK_CONFIG.minDurationSeconds * FSK_CONFIG.baudRate);
+    while (binary.length < minBits) {
       binary += '1';
     }
 
