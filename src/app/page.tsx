@@ -10,6 +10,7 @@ function HomeContent() {
   const searchParams = useSearchParams();
 
   const [config, setConfig] = useState<LiveShellConfig>({
+    device: 'LiveShellPro',
     connectionType: 'ethernet',
     ipMode: 'dhcp',
     streamMode: 'rtmp',
@@ -128,6 +129,28 @@ function HomeContent() {
       </div>
 
       <div className="space-y-6">
+        {/* デバイス選択 */}
+        <div className="card">
+          <h2 className="text-xl font-semibold mb-4">0. デバイス選択</h2>
+          <div className="space-y-2">
+            <label className="block text-sm text-gray-400 mb-1">機種</label>
+            <select
+              value={config.device || 'LiveShellPro'}
+              onChange={e => setConfig(prev => ({
+                ...prev,
+                device: e.target.value as LiveShellConfig['device'],
+              }))}
+              className="input"
+            >
+              <option value="LiveShellPro">LiveShell PRO</option>
+              <option value="LiveShell2">LiveShell 2</option>
+            </select>
+            <p className="text-xs text-gray-500">
+              LiveShell X は未対応です（今後対応予定）
+            </p>
+          </div>
+        </div>
+
         {/* ネットワーク設定 */}
         <div className="card">
           <h2 className="text-xl font-semibold mb-4">1. ネットワーク設定</h2>
