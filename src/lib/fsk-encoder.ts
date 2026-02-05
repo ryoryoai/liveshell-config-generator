@@ -1,13 +1,15 @@
 /**
- * LiveShell PRO FSK Audio Encoder
+ * LiveShell Local Mode Audio Encoder
  *
- * サンプル音声解析に基づくパラメータ:
- * - スペース周波数: 5512.5 Hz (ビット 0) = sampleRate / 8
- * - マーク周波数: 11025 Hz (ビット 1) = sampleRate / 4
- * - ボーレート: 1225 bps (36 samples/bit)
- * - サンプルレート: 44100 Hz
- * - 振幅: 0.1 (10%)
+ * Source: Wayback `ls-local.cerevo.com` (2025-04-08)
+ * - 8N1 framing (MSB first)
+ * - 12-bit preamble/postamble
+ * - CRC16 (CCITT)
+ * - 32 samples/bit
+ * - Repeat payload 3 times
  */
+
+export type WiFiEncryptionScheme = 'WPA' | 'WEP_Open' | 'WEP_Shared' | 'None';
 
 export interface LiveShellConfig {
   // ネットワーク設定
@@ -21,181 +23,77 @@ export interface LiveShellConfig {
   // Wi-Fi設定（Wi-Fi選択時のみ）
   ssid?: string;
   password?: string;
+  wifiStealthMode?: boolean;
+  wifiEncryptionScheme?: WiFiEncryptionScheme;
 
-  // 配信設定
-  streamMode: 'rtmp' | 'rtsp';
+  // 配信設定（RTMPのみ対応）
+  streamMode: 'rtmp';
   rtmpUrl?: string;
   streamKey?: string;
+  rtmpOneTime?: boolean;
+  rtmpWithAuth?: boolean;
+  rtmpAuthUserName?: string;
+  rtmpAuthPassword?: string;
+
+  // デバイス種別（未指定ならPro）
+  device?: 'LiveShell2' | 'LiveShellPro' | 'LiveShellX';
 }
 
-const FSK_CONFIG = {
-  sampleRate: 44100,
-  // 周波数はサンプルレートの1/8と1/4
-  get spaceFreq() { return this.sampleRate / 8; },  // 5512.5 Hz (ビット 0)
-  get markFreq() { return this.sampleRate / 4; },   // 11025 Hz (ビット 1)
-  get baudRate() { return this.sampleRate / 36; },  // 1225 bps
-  get samplesPerBit() { return 36; },
-  amplitude: 0.1,  // サンプル音声と同じ振幅
-  // プリアンブル（同期用）- Wayback音声解析結果: 約10ビット
-  preambleLength: 10,
-  // ポストアンブル
-  postambleLength: 50,
-  // 最小長さ（サンプル音声が約4秒）
-  minDurationSeconds: 4,
+const SAMPLE_RATES = {
+  LiveShell2: 16000,
+  LiveShellPro: 44100,
+  LiveShellX: 48000,
+} as const;
+
+const PREAMBLE_BITS = 12;
+const POSTAMBLE_BITS = 12;
+const SAMPLES_PER_BIT = 32;
+const REPEAT_COUNT = 3;
+
+const WAVE_INT16_AMPLITUDE = 3276;
+const INT16_SCALE = 32768;
+
+const WAVE_TABLE = (() => {
+  const wave0 = new Float32Array(SAMPLES_PER_BIT);
+  const wave1 = new Float32Array(SAMPLES_PER_BIT);
+  for (let i = 0; i < SAMPLES_PER_BIT; i++) {
+    const s0 = Math.round(WAVE_INT16_AMPLITUDE * Math.sin(i * Math.PI * 2 / 8));
+    const s1 = Math.round(WAVE_INT16_AMPLITUDE * Math.sin(i * Math.PI * 4 / 8));
+    wave0[i] = s0 / INT16_SCALE;
+    wave1[i] = s1 / INT16_SCALE;
+  }
+  return [wave0, wave1];
+})();
+
+export const FSK_PARAMS = {
+  sampleRate: SAMPLE_RATES.LiveShellPro,
+  spaceFreq: 5512.5,
+  markFreq: 11025,
+  baudRate: SAMPLE_RATES.LiveShellPro / SAMPLES_PER_BIT,
+  samplesPerBit: SAMPLES_PER_BIT,
+  preambleBits: PREAMBLE_BITS,
+  postambleBits: POSTAMBLE_BITS,
+  repeatCount: REPEAT_COUNT,
+  amplitude: WAVE_INT16_AMPLITUDE / INT16_SCALE,
 };
 
 export class LiveShellFSKEncoder {
   private audioContext: AudioContext | null = null;
 
-  /**
-   * 設定をJSONにシリアライズ
-   */
-  private serializeConfig(config: LiveShellConfig): string {
-    const payload: Record<string, unknown> = {
-      net: {
-        type: config.connectionType === 'wifi' ? 'wifi' : 'eth',
-        ip: config.ipMode,
-      },
-      stream: {
-        mode: config.streamMode,
-      },
-    };
-
-    // 固定IP設定
-    if (config.ipMode === 'static') {
-      payload.net = {
-        ...payload.net as object,
-        addr: config.staticIp,
-        mask: config.subnetMask,
-        gw: config.gateway,
-        dns: config.dns,
-      };
-    }
-
-    // Wi-Fi設定
-    if (config.connectionType === 'wifi') {
-      payload.wifi = {
-        ssid: config.ssid,
-        pass: config.password,
-      };
-    }
-
-    // RTMP設定
-    if (config.streamMode === 'rtmp' && config.rtmpUrl) {
-      payload.stream = {
-        ...payload.stream as object,
-        url: config.rtmpUrl,
-        key: config.streamKey || '',
-      };
-    }
-
-    return JSON.stringify(payload);
-  }
-
-  /**
-   * 文字列をバイナリに変換（8N1フォーマット）
-   * Wayback Machine音声解析に基づく構造:
-   * - プリアンブル: 約10ビットの連続した1
-   * - データ: 8N1 (スタート0 + 8bit LSB first + ストップ1)
-   * - ポストアンブル: 連続した1でパディング
-   */
-  private stringToBinary(str: string): string {
-    let binary = '';
-
-    // プリアンブル（約10ビットの連続した1）
-    for (let i = 0; i < FSK_CONFIG.preambleLength; i++) {
-      binary += '1';
-    }
-
-    // データ（8N1フォーマット）- 1回のみ送信
-    for (let i = 0; i < str.length; i++) {
-      const charCode = str.charCodeAt(i);
-      // 8N1: スタートビット(0) + 8データビット(LSB first) + ストップビット(1)
-      binary += '0'; // スタートビット
-
-      // LSB first
-      for (let bit = 0; bit < 8; bit++) {
-        binary += ((charCode >> bit) & 1).toString();
-      }
-
-      binary += '1'; // ストップビット
-    }
-
-    // ポストアンブル（連続した1）
-    for (let i = 0; i < FSK_CONFIG.postambleLength; i++) {
-      binary += '1';
-    }
-
-    // 最小長さを確保（約4秒）
-    const minBits = Math.ceil(FSK_CONFIG.minDurationSeconds * FSK_CONFIG.baudRate);
-    while (binary.length < minBits) {
-      binary += '1';
-    }
-
-    return binary;
-  }
-
-  /**
-   * FSK変調してAudioBufferを生成
-   */
   generateAudio(config: LiveShellConfig): AudioBuffer {
-    if (!this.audioContext) {
-      this.audioContext = new AudioContext({ sampleRate: FSK_CONFIG.sampleRate });
-    }
+    const sampleRate = SAMPLE_RATES[config.device ?? 'LiveShellPro'];
+    const configString = this.buildConfigString(config);
+    const samples = this.encodeToSamples(configString);
 
-    const jsonData = this.serializeConfig(config);
-    console.log('Config JSON:', jsonData);
-    console.log('JSON length:', jsonData.length, 'chars');
-
-    const binaryData = this.stringToBinary(jsonData);
-    console.log('Binary length:', binaryData.length, 'bits');
-
-    const samplesPerBit = FSK_CONFIG.samplesPerBit;
-    const totalSamples = binaryData.length * samplesPerBit;
-    const duration = totalSamples / FSK_CONFIG.sampleRate;
-    console.log('Audio duration:', duration.toFixed(2), 'seconds');
-
-    const buffer = this.audioContext.createBuffer(
-      1, // モノラル
-      totalSamples,
-      FSK_CONFIG.sampleRate
-    );
-
-    const channelData = buffer.getChannelData(0);
-    let sampleIndex = 0;
-    let phase = 0;
-
-    const spaceFreq = FSK_CONFIG.spaceFreq;
-    const markFreq = FSK_CONFIG.markFreq;
-    const amplitude = FSK_CONFIG.amplitude;
-    const sampleRate = FSK_CONFIG.sampleRate;
-
-    for (let i = 0; i < binaryData.length; i++) {
-      const freq = binaryData[i] === '1' ? markFreq : spaceFreq;
-      const phaseIncrement = (2 * Math.PI * freq) / sampleRate;
-
-      for (let j = 0; j < samplesPerBit; j++) {
-        // 位相連続FSK
-        channelData[sampleIndex] = amplitude * Math.sin(phase);
-        phase += phaseIncrement;
-        sampleIndex++;
-      }
-
-      // 位相を正規化（オーバーフロー防止）
-      if (phase > 2 * Math.PI * 1000) {
-        phase = phase % (2 * Math.PI);
-      }
-    }
-
+    this.ensureContext(sampleRate);
+    const buffer = this.audioContext!.createBuffer(1, samples.length, sampleRate);
+    buffer.getChannelData(0).set(samples);
     return buffer;
   }
 
-  /**
-   * AudioBufferを再生
-   */
   async play(buffer: AudioBuffer): Promise<void> {
     if (!this.audioContext) {
-      this.audioContext = new AudioContext({ sampleRate: FSK_CONFIG.sampleRate });
+      this.audioContext = new AudioContext({ sampleRate: buffer.sampleRate });
     }
 
     if (this.audioContext.state === 'suspended') {
@@ -211,9 +109,6 @@ export class LiveShellFSKEncoder {
     });
   }
 
-  /**
-   * AudioBufferをWAVファイルに変換してダウンロード
-   */
   downloadAsWav(buffer: AudioBuffer, filename: string = 'liveshell_config.wav'): void {
     const wavData = this.audioBufferToWav(buffer);
     const blob = new Blob([wavData], { type: 'audio/wav' });
@@ -227,13 +122,188 @@ export class LiveShellFSKEncoder {
     URL.revokeObjectURL(url);
   }
 
-  /**
-   * AudioBufferをWAVバイナリに変換
-   */
+  private ensureContext(sampleRate: number): void {
+    if (!this.audioContext || this.audioContext.sampleRate !== sampleRate) {
+      if (this.audioContext) {
+        this.audioContext.close();
+      }
+      this.audioContext = new AudioContext({ sampleRate });
+    }
+  }
+
+  private buildConfigString(config: LiveShellConfig): string {
+    const networkString = this.buildNetworkString(config);
+    if (!networkString) {
+      throw new Error('ネットワーク設定が不正です');
+    }
+
+    const liveObject = this.buildLiveObject(config);
+    if (!liveObject) {
+      throw new Error('RTMP設定が不正です');
+    }
+
+    return `${networkString}[LOCAL]\nLIVE=${JSON.stringify(liveObject)}\n`;
+  }
+
+  private buildNetworkString(config: LiveShellConfig): string | null {
+    if (config.connectionType === 'wifi') {
+      if (!config.ssid) {
+        return null;
+      }
+
+      const stealth = config.wifiStealthMode ?? false;
+      const scheme = config.wifiEncryptionScheme ?? 'WPA';
+      const password = config.password ?? '';
+
+      let out = `[WLAN1]\nESSID=${config.ssid}\n`;
+
+      if (password !== '' && scheme !== 'None') {
+        if (stealth && scheme === 'WPA') {
+          out += `PSK=${password}\n`;
+        } else {
+          out += `WEP=${password}\n`;
+          if (stealth && scheme === 'WEP_Shared') {
+            out += 'MODE=SHARED\n';
+          }
+        }
+      }
+
+      if (
+        config.ipMode === 'static' &&
+        config.staticIp &&
+        config.subnetMask &&
+        config.gateway &&
+        config.dns
+      ) {
+        out += `IP=${config.staticIp};${config.gateway};${config.subnetMask}\nDNS=${config.dns}\n`;
+      }
+
+      return out;
+    }
+
+    if (config.connectionType === 'ethernet') {
+      let out = '[ETHER]\n';
+
+      if (
+        config.ipMode === 'static' &&
+        config.staticIp &&
+        config.subnetMask &&
+        config.gateway &&
+        config.dns
+      ) {
+        out += `IP=${config.staticIp};${config.gateway};${config.subnetMask}\nDNS=${config.dns}\n`;
+      }
+
+      return out;
+    }
+
+    return null;
+  }
+
+  private buildLiveObject(config: LiveShellConfig): Record<string, unknown> | null {
+    if (config.streamMode !== 'rtmp' || !config.rtmpUrl || !config.streamKey) {
+      return null;
+    }
+
+    const match = config.rtmpUrl.match(
+      /^(rtmps?:\/\/[-A-Za-z0-9.@_~!#$&'()*+,:;=?[\]]+)(?:\/([-A-Za-z0-9./@_~!#$&'()*+,:;=?[\]]+))?$/
+    );
+    if (!match) {
+      return null;
+    }
+
+    const baseUrl = match[1];
+    const app = match.length > 2 ? match[2] : null;
+
+    let url = baseUrl;
+    if (app) {
+      url += ` app=${app}`;
+    }
+    url += ` playPath=${config.streamKey}`;
+    url += ' flashver=FME/3.0\\\\20(compatible;\\\\20FMSc/1.0)';
+
+    if (config.rtmpWithAuth && config.rtmpAuthUserName && config.rtmpAuthPassword) {
+      url += ` pubUser=${config.rtmpAuthUserName} pubPasswd=${config.rtmpAuthPassword}`;
+    }
+
+    return {
+      type: 0,
+      rtmp: {
+        onetime: config.rtmpOneTime ?? false,
+        url,
+      },
+    };
+  }
+
+  private encodeToSamples(text: string): Float32Array {
+    const bytes = new TextEncoder().encode(text);
+    const bits = this.buildBits(bytes);
+    const baseSamples = this.bitsToSamples(bits);
+    const totalSamples = baseSamples.length * REPEAT_COUNT;
+
+    const samples = new Float32Array(totalSamples);
+    for (let i = 0; i < REPEAT_COUNT; i++) {
+      samples.set(baseSamples, i * baseSamples.length);
+    }
+
+    return samples;
+  }
+
+  private buildBits(bytes: Uint8Array): number[] {
+    const bits: number[] = [];
+
+    for (let i = 0; i < PREAMBLE_BITS; i++) {
+      bits.push(1);
+    }
+
+    let crc = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      const value = bytes[i];
+      this.pushFramedByte(bits, value);
+      crc = this.crc16Update(crc, value);
+    }
+
+    this.pushFramedByte(bits, (crc >> 8) & 0xff);
+    this.pushFramedByte(bits, crc & 0xff);
+
+    for (let i = 0; i < POSTAMBLE_BITS; i++) {
+      bits.push(1);
+    }
+
+    return bits;
+  }
+
+  private pushFramedByte(bits: number[], value: number): void {
+    bits.push(0);
+    for (let i = 7; i >= 0; i--) {
+      bits.push((value >> i) & 1);
+    }
+    bits.push(1);
+  }
+
+  private bitsToSamples(bits: number[]): Float32Array {
+    const samples = new Float32Array(bits.length * SAMPLES_PER_BIT);
+    let offset = 0;
+    for (const bit of bits) {
+      const wave = bit === 1 ? WAVE_TABLE[1] : WAVE_TABLE[0];
+      samples.set(wave, offset);
+      offset += SAMPLES_PER_BIT;
+    }
+    return samples;
+  }
+
+  private crc16Update(crc: number, value: number): number {
+    let c = crc ^ (value << 8);
+    for (let i = 0; i < 8; i++) {
+      c = (c & 0x8000) !== 0 ? (c << 1) ^ 0x1021 : c << 1;
+    }
+    return c & 0xffff;
+  }
+
   private audioBufferToWav(buffer: AudioBuffer): ArrayBuffer {
     const numChannels = buffer.numberOfChannels;
     const sampleRate = buffer.sampleRate;
-    const format = 1; // PCM
+    const format = 1;
     const bitDepth = 16;
 
     const bytesPerSample = bitDepth / 8;
@@ -246,12 +316,11 @@ export class LiveShellFSKEncoder {
     const arrayBuffer = new ArrayBuffer(bufferLength);
     const view = new DataView(arrayBuffer);
 
-    // WAVヘッダー
     this.writeString(view, 0, 'RIFF');
     view.setUint32(4, bufferLength - 8, true);
     this.writeString(view, 8, 'WAVE');
     this.writeString(view, 12, 'fmt ');
-    view.setUint32(16, 16, true); // fmt chunk size
+    view.setUint32(16, 16, true);
     view.setUint16(20, format, true);
     view.setUint16(22, numChannels, true);
     view.setUint32(24, sampleRate, true);
@@ -261,11 +330,10 @@ export class LiveShellFSKEncoder {
     this.writeString(view, 36, 'data');
     view.setUint32(40, dataLength, true);
 
-    // オーディオデータ
     let offset = 44;
     for (let i = 0; i < samples.length; i++) {
       const sample = Math.max(-1, Math.min(1, samples[i]));
-      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+      const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
       view.setInt16(offset, intSample, true);
       offset += 2;
     }

@@ -15,6 +15,8 @@ function HomeContent() {
     streamMode: 'rtmp',
     rtmpUrl: initialPlatform.rtmpUrl,
     streamKey: '',
+    wifiStealthMode: false,
+    wifiEncryptionScheme: 'WPA',
   });
 
   const [platform, setPlatform] = useState(initialPlatform.id);
@@ -179,6 +181,33 @@ function HomeContent() {
                     placeholder="Wi-Fiパスワード"
                   />
                 </div>
+                <div className="col-span-2 flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={config.wifiStealthMode || false}
+                    onChange={e => setConfig(prev => ({ ...prev, wifiStealthMode: e.target.checked }))}
+                    className="text-cerevo-500"
+                  />
+                  <span className="text-sm text-gray-300">ステルスAPを使用</span>
+                </div>
+                {config.wifiStealthMode && (
+                  <div className="col-span-2">
+                    <label className="block text-sm text-gray-400 mb-1">Wi-Fi 暗号化方式</label>
+                    <select
+                      value={config.wifiEncryptionScheme || 'WPA'}
+                      onChange={e => setConfig(prev => ({
+                        ...prev,
+                        wifiEncryptionScheme: e.target.value as LiveShellConfig['wifiEncryptionScheme'],
+                      }))}
+                      className="input"
+                    >
+                      <option value="WPA">WPA/WPA2</option>
+                      <option value="WEP_Open">WEP (Open)</option>
+                      <option value="WEP_Shared">WEP (Shared)</option>
+                      <option value="None">パスワードなし</option>
+                    </select>
+                  </div>
+                )}
               </div>
             )}
 
